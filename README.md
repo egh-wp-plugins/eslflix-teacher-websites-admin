@@ -9,6 +9,7 @@ WordPress administration tools for preparing ESLFlix teacher website accounts.
 - Reset a teacher's WordPress password and display the replacement once.
 - Show teachers with generated codes, unlocked builders, or existing profiles.
 - Display requested `*.eslflix.com` subdomains from the `teacher_websites` table.
+- Open each teacher's reliable builder-hosted website or private preview, even before a custom domain is connected.
 - Record a manually configured custom domain for each teacher.
 
 Builder codes and replacement passwords are never stored as readable text.

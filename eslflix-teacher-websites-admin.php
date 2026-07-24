@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       ESLFlix Teacher Websites Admin
  * Description:       Prepare teacher website accounts, issue single-use builder codes, reset passwords, and manage requested domains.
- * Version:           1.0.0
+ * Version:           1.0.1
  * Author:            ESLFlix
  */
 
@@ -10,13 +10,14 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'ESLFLIX_TWA_VERSION', '1.0.0' );
+define( 'ESLFLIX_TWA_VERSION', '1.0.1' );
 define( 'ESLFLIX_TWA_CODE_HASH_META', 'teacher_builder_code_hash' );
 define( 'ESLFLIX_TWA_CODE_CREATED_META', 'teacher_builder_code_created_at' );
 define( 'ESLFLIX_TWA_CODE_USED_META', 'teacher_builder_code_used_at' );
 define( 'ESLFLIX_TWA_ACCESS_META', 'teacher_builder_access_granted' );
 define( 'ESLFLIX_TWA_CUSTOM_DOMAIN_META', 'teacher_builder_custom_domain' );
 define( 'ESLFLIX_TWA_CAPABILITY', 'manage_teacher_websites' );
+define( 'ESLFLIX_TWA_SITE_BASE_URL', 'https://teacher-sites.english-grammar-homework.com/' );
 
 /**
  * Grant teacher-website administration to WordPress administrators and the
@@ -407,7 +408,7 @@ function eslflix_twa_get_profile_records() {
 
     $table = eslflix_twa_profile_table_name();
     $rows = $wpdb->get_results(
-        "SELECT id, user_id, subdomain, published, updated_at FROM {$table} ORDER BY updated_at DESC",
+        "SELECT id, user_id, slug, preview_token, subdomain, published, updated_at FROM {$table} ORDER BY updated_at DESC",
         ARRAY_A
     );
 
@@ -415,6 +416,8 @@ function eslflix_twa_get_profile_records() {
     foreach ( (array) $rows as $row ) {
         $records[ absint( $row['user_id'] ) ] = [
             'id'         => absint( $row['id'] ),
+            'slug'       => sanitize_title( (string) $row['slug'] ),
+            'preview'    => preg_replace( '/[^a-f0-9]/', '', strtolower( (string) $row['preview_token'] ) ),
             'subdomain'  => sanitize_text_field( (string) $row['subdomain'] ),
             'published'  => ! empty( $row['published'] ),
             'updated_at' => sanitize_text_field( (string) $row['updated_at'] ),
@@ -641,7 +644,7 @@ function eslflix_twa_render_admin_page() {
                             <tr>
                                 <th>Teacher</th>
                                 <th>Status</th>
-                                <th>Website ID</th>
+                                <th>Website</th>
                                 <th>Requested ESLFlix subdomain</th>
                                 <th>Custom domain</th>
                                 <th>Account actions</th>
@@ -653,6 +656,22 @@ function eslflix_twa_render_admin_page() {
                                 $profile = $profile_records[ $teacher->ID ] ?? null;
                                 $status = eslflix_twa_get_teacher_status( $teacher->ID, $profile );
                                 $subdomain = $profile['subdomain'] ?? '';
+                                $site_url = '';
+                                $site_link_label = '';
+                                $site_path = '';
+                                if ( $profile && $profile['published'] && $profile['slug'] !== '' ) {
+                                    $site_path = 'teacher/' . rawurlencode( $profile['slug'] ) . '/';
+                                    $site_url = ESLFLIX_TWA_SITE_BASE_URL . $site_path;
+                                    $site_link_label = 'View site';
+                                } elseif ( $profile && $profile['preview'] !== '' ) {
+                                    $site_path = 'preview/' . rawurlencode( $profile['preview'] ) . '/';
+                                    $site_url = ESLFLIX_TWA_SITE_BASE_URL . $site_path;
+                                    $site_link_label = 'View preview';
+                                } elseif ( $profile && $profile['slug'] !== '' ) {
+                                    $site_path = 'teacher/' . rawurlencode( $profile['slug'] ) . '/';
+                                    $site_url = ESLFLIX_TWA_SITE_BASE_URL . $site_path;
+                                    $site_link_label = 'Open builder URL';
+                                }
                                 $custom_domain = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_CUSTOM_DOMAIN_META, true );
                                 $has_access = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_ACCESS_META, true ) === '1';
                                 $has_code = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_CODE_HASH_META, true ) !== '';
@@ -675,9 +694,18 @@ function eslflix_twa_render_admin_page() {
                                             <span class="eslflix-twa-published">Published</span>
                                         <?php endif; ?>
                                     </td>
-                                    <td data-label="Website ID">
+                                    <td data-label="Website">
                                         <?php if ( $profile ) : ?>
-                                            <strong class="eslflix-twa-site-id">#<?php echo esc_html( $profile['id'] ); ?></strong>
+                                            <div class="eslflix-twa-site-cell">
+                                                <span class="eslflix-twa-site-id">#<?php echo esc_html( $profile['id'] ); ?></span>
+                                                <?php if ( $site_url !== '' ) : ?>
+                                                    <a class="eslflix-twa-view-site" href="<?php echo esc_url( $site_url ); ?>" target="_blank" rel="noopener noreferrer">
+                                                        <?php echo esc_html( $site_link_label ); ?>
+                                                        <span class="dashicons dashicons-external" aria-hidden="true"></span>
+                                                    </a>
+                                                    <small title="<?php echo esc_attr( $site_url ); ?>">/<?php echo esc_html( $site_path ); ?></small>
+                                                <?php endif; ?>
+                                            </div>
                                         <?php else : ?>
                                             <span class="eslflix-twa-muted">Created after first builder visit</span>
                                         <?php endif; ?>
