@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       ESLFlix Teacher Websites Admin
  * Description:       Prepare teacher website accounts, issue single-use builder codes, reset passwords, and manage requested domains.
- * Version:           1.0.2
+ * Version:           1.1.0
  * Author:            ESLFlix
  */
 
@@ -10,12 +10,13 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'ESLFLIX_TWA_VERSION', '1.0.2' );
+define( 'ESLFLIX_TWA_VERSION', '1.1.0' );
 define( 'ESLFLIX_TWA_CODE_HASH_META', 'teacher_builder_code_hash' );
 define( 'ESLFLIX_TWA_CODE_CREATED_META', 'teacher_builder_code_created_at' );
 define( 'ESLFLIX_TWA_CODE_USED_META', 'teacher_builder_code_used_at' );
 define( 'ESLFLIX_TWA_ACCESS_META', 'teacher_builder_access_granted' );
 define( 'ESLFLIX_TWA_CUSTOM_DOMAIN_META', 'teacher_builder_custom_domain' );
+define( 'ESLFLIX_TWA_CONNECTED_DOMAIN_META', 'teacher_builder_connected_domain' );
 define( 'ESLFLIX_TWA_CAPABILITY', 'manage_teacher_websites' );
 define( 'ESLFLIX_TWA_SITE_BASE_URL', 'https://teacher-sites.english-grammar-homework.com/' );
 
@@ -174,6 +175,43 @@ function eslflix_twa_profile_table_exists() {
     global $wpdb;
     $table = eslflix_twa_profile_table_name();
     return $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $table ) ) === $table;
+}
+
+/**
+ * Change whether a teacher profile is publicly available on its connected domain.
+ */
+function eslflix_twa_set_profile_published( $user_id, $published ) {
+    global $wpdb;
+    if ( ! eslflix_twa_profile_table_exists() ) {
+        return false;
+    }
+
+    return false !== $wpdb->update(
+        eslflix_twa_profile_table_name(),
+        [
+            'published'  => $published ? 1 : 0,
+            'updated_at' => current_time( 'mysql' ),
+        ],
+        [ 'user_id' => absint( $user_id ) ],
+        [ '%d', '%s' ],
+        [ '%d' ]
+    );
+}
+
+/**
+ * Return the requested ESLFlix domain for a profile record.
+ */
+function eslflix_twa_requested_domain( $profile ) {
+    $subdomain = is_array( $profile ) ? sanitize_title( (string) ( $profile['subdomain'] ?? '' ) ) : '';
+    return $subdomain !== '' ? $subdomain . '.eslflix.com' : '';
+}
+
+/**
+ * Return the domain that should be connected for a teacher.
+ */
+function eslflix_twa_preferred_domain( $user_id, $profile ) {
+    $custom_domain = strtolower( trim( (string) get_user_meta( $user_id, ESLFLIX_TWA_CUSTOM_DOMAIN_META, true ) ) );
+    return $custom_domain !== '' ? $custom_domain : eslflix_twa_requested_domain( $profile );
 }
 
 /**
@@ -340,12 +378,57 @@ function eslflix_twa_handle_admin_action() {
             delete_user_meta( $user_id, ESLFLIX_TWA_CUSTOM_DOMAIN_META );
         }
 
+        $profile_records = eslflix_twa_get_profile_records();
+        $preferred_domain = eslflix_twa_preferred_domain( $user_id, $profile_records[ $user_id ] ?? null );
+        $connected_domain = strtolower( trim( (string) get_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META, true ) ) );
+        if ( $connected_domain !== '' && $connected_domain !== $preferred_domain ) {
+            delete_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META );
+            eslflix_twa_set_profile_published( $user_id, false );
+        }
+
         eslflix_twa_set_admin_notice(
             [
                 'type'    => 'success',
                 'message' => $domain === ''
                     ? sprintf( 'The custom domain was cleared for %s.', $user->display_name )
                     : sprintf( '%s is now recorded for %s.', $domain, $user->display_name ),
+            ]
+        );
+        eslflix_twa_redirect_after_action( $user_id );
+    }
+
+    if ( 'set_domain_connected' === $requested_action ) {
+        $profile_records = eslflix_twa_get_profile_records();
+        $profile = $profile_records[ $user_id ] ?? null;
+        $preferred_domain = eslflix_twa_preferred_domain( $user_id, $profile );
+        $should_connect = isset( $_POST['connected'] ) && '1' === sanitize_text_field( wp_unslash( $_POST['connected'] ) );
+
+        if ( $should_connect && ( $preferred_domain === '' || ! $profile ) ) {
+            eslflix_twa_set_admin_notice(
+                [
+                    'type'    => 'error',
+                    'message' => $preferred_domain === ''
+                        ? 'A requested subdomain or custom domain is required before it can be confirmed as connected.'
+                        : 'The teacher must open the builder once before a domain can be connected.',
+                ]
+            );
+            eslflix_twa_redirect_after_action( $user_id );
+        }
+
+        if ( $should_connect ) {
+            update_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META, $preferred_domain );
+            eslflix_twa_set_profile_published( $user_id, true );
+        } else {
+            delete_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META );
+            eslflix_twa_set_profile_published( $user_id, false );
+        }
+
+        eslflix_twa_set_admin_notice(
+            [
+                'type'    => 'success',
+                'message' => $should_connect
+                    ? sprintf( '%s is confirmed as connected for %s.', $preferred_domain, $user->display_name )
+                    : sprintf( 'The public website link was disabled for %s.', $user->display_name ),
             ]
         );
         eslflix_twa_redirect_after_action( $user_id );
@@ -435,6 +518,7 @@ function eslflix_twa_get_ready_teachers( $profile_records ) {
         ESLFLIX_TWA_CODE_HASH_META,
         ESLFLIX_TWA_ACCESS_META,
         ESLFLIX_TWA_CUSTOM_DOMAIN_META,
+        ESLFLIX_TWA_CONNECTED_DOMAIN_META,
     ];
     $placeholders = implode( ', ', array_fill( 0, count( $meta_keys ), '%s' ) );
     $sql = $wpdb->prepare(
@@ -646,6 +730,7 @@ function eslflix_twa_render_admin_page() {
                                 <th>Website</th>
                                 <th>Requested ESLFlix subdomain</th>
                                 <th>Custom domain</th>
+                                <th>Domain connection</th>
                                 <th>Account actions</th>
                             </tr>
                         </thead>
@@ -664,6 +749,9 @@ function eslflix_twa_render_admin_page() {
                                     $site_link_label = 'View site';
                                 }
                                 $custom_domain = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_CUSTOM_DOMAIN_META, true );
+                                $preferred_domain = eslflix_twa_preferred_domain( $teacher->ID, $profile );
+                                $connected_domain = strtolower( trim( (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_CONNECTED_DOMAIN_META, true ) ) );
+                                $domain_is_connected = $preferred_domain !== '' && $connected_domain === $preferred_domain;
                                 $has_access = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_ACCESS_META, true ) === '1';
                                 $has_code = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_CODE_HASH_META, true ) !== '';
                                 $replacement_code = $has_access || $has_code;
@@ -714,6 +802,29 @@ function eslflix_twa_render_admin_page() {
                                             <input type="text" name="custom_domain" value="<?php echo esc_attr( $custom_domain ); ?>" placeholder="teacher-domain.com" aria-label="Custom domain for <?php echo esc_attr( $teacher->display_name ); ?>">
                                             <button type="submit" class="button">Save</button>
                                         </form>
+                                    </td>
+                                    <td data-label="Domain connection">
+                                        <?php if ( $preferred_domain !== '' && $profile ) : ?>
+                                            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="eslflix-twa-connection-form">
+                                                <?php eslflix_twa_render_action_fields( $teacher->ID, 'set_domain_connected' ); ?>
+                                                <button
+                                                    type="submit"
+                                                    name="connected"
+                                                    value="<?php echo $domain_is_connected ? '0' : '1'; ?>"
+                                                    class="eslflix-twa-domain-toggle<?php echo $domain_is_connected ? ' is-connected' : ''; ?><?php echo $domain_is_connected ? ' eslflix-twa-requires-confirmation' : ''; ?>"
+                                                    aria-pressed="<?php echo $domain_is_connected ? 'true' : 'false'; ?>"
+                                                    <?php if ( $domain_is_connected ) : ?>
+                                                        data-confirm="Mark this domain as disconnected? The teacher's View website button will be disabled immediately."
+                                                    <?php endif; ?>
+                                                >
+                                                    <span class="eslflix-twa-domain-toggle-track" aria-hidden="true"><i></i></span>
+                                                    <span><?php echo $domain_is_connected ? 'Connected' : 'Confirm connected'; ?></span>
+                                                </button>
+                                                <small title="<?php echo esc_attr( $preferred_domain ); ?>"><?php echo esc_html( $preferred_domain ); ?></small>
+                                            </form>
+                                        <?php else : ?>
+                                            <span class="eslflix-twa-muted"><?php echo $preferred_domain === '' ? 'No domain to connect' : 'Teacher has not opened builder'; ?></span>
+                                        <?php endif; ?>
                                     </td>
                                     <td data-label="Account actions">
                                         <div class="eslflix-twa-row-actions">

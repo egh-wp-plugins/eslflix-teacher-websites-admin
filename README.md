@@ -11,5 +11,6 @@ WordPress administration tools for preparing ESLFlix teacher website accounts.
 - Display requested `*.eslflix.com` subdomains from the `teacher_websites` table.
 - Open each teacher's permanent builder-hosted website, even before a custom domain is connected.
 - Record a manually configured custom domain for each teacher.
+- Confirm the exact public domain after DNS and hosting are connected; until then, the builder's **View website** button remains disabled.
 
 Builder codes and replacement passwords are never stored as readable text.
