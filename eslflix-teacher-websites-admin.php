@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       ESLFlix Teacher Websites Admin
  * Description:       Prepare teacher website accounts, issue single-use builder codes, reset passwords, and manage requested domains.
- * Version:           1.0.1
+ * Version:           1.0.2
  * Author:            ESLFlix
  */
 
@@ -10,7 +10,7 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'ESLFLIX_TWA_VERSION', '1.0.1' );
+define( 'ESLFLIX_TWA_VERSION', '1.0.2' );
 define( 'ESLFLIX_TWA_CODE_HASH_META', 'teacher_builder_code_hash' );
 define( 'ESLFLIX_TWA_CODE_CREATED_META', 'teacher_builder_code_created_at' );
 define( 'ESLFLIX_TWA_CODE_USED_META', 'teacher_builder_code_used_at' );
@@ -408,7 +408,7 @@ function eslflix_twa_get_profile_records() {
 
     $table = eslflix_twa_profile_table_name();
     $rows = $wpdb->get_results(
-        "SELECT id, user_id, slug, preview_token, subdomain, published, updated_at FROM {$table} ORDER BY updated_at DESC",
+        "SELECT id, user_id, slug, subdomain, published, updated_at FROM {$table} ORDER BY updated_at DESC",
         ARRAY_A
     );
 
@@ -417,7 +417,6 @@ function eslflix_twa_get_profile_records() {
         $records[ absint( $row['user_id'] ) ] = [
             'id'         => absint( $row['id'] ),
             'slug'       => sanitize_title( (string) $row['slug'] ),
-            'preview'    => preg_replace( '/[^a-f0-9]/', '', strtolower( (string) $row['preview_token'] ) ),
             'subdomain'  => sanitize_text_field( (string) $row['subdomain'] ),
             'published'  => ! empty( $row['published'] ),
             'updated_at' => sanitize_text_field( (string) $row['updated_at'] ),
@@ -659,18 +658,10 @@ function eslflix_twa_render_admin_page() {
                                 $site_url = '';
                                 $site_link_label = '';
                                 $site_path = '';
-                                if ( $profile && $profile['published'] && $profile['slug'] !== '' ) {
+                                if ( $profile && $profile['slug'] !== '' ) {
                                     $site_path = 'teacher/' . rawurlencode( $profile['slug'] ) . '/';
                                     $site_url = ESLFLIX_TWA_SITE_BASE_URL . $site_path;
                                     $site_link_label = 'View site';
-                                } elseif ( $profile && $profile['preview'] !== '' ) {
-                                    $site_path = 'preview/' . rawurlencode( $profile['preview'] ) . '/';
-                                    $site_url = ESLFLIX_TWA_SITE_BASE_URL . $site_path;
-                                    $site_link_label = 'View preview';
-                                } elseif ( $profile && $profile['slug'] !== '' ) {
-                                    $site_path = 'teacher/' . rawurlencode( $profile['slug'] ) . '/';
-                                    $site_url = ESLFLIX_TWA_SITE_BASE_URL . $site_path;
-                                    $site_link_label = 'Open builder URL';
                                 }
                                 $custom_domain = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_CUSTOM_DOMAIN_META, true );
                                 $has_access = (string) get_user_meta( $teacher->ID, ESLFLIX_TWA_ACCESS_META, true ) === '1';
