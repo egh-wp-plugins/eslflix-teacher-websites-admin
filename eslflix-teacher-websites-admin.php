@@ -2,7 +2,7 @@
 /**
  * Plugin Name:       ESLFlix Teacher Websites Admin
  * Description:       Prepare teacher website accounts, issue single-use builder codes, reset passwords, and manage requested domains.
- * Version:           1.1.0
+ * Version:           1.4.2
  * Author:            ESLFlix
  */
 
@@ -10,15 +10,86 @@ if ( ! defined( 'ABSPATH' ) ) {
     exit;
 }
 
-define( 'ESLFLIX_TWA_VERSION', '1.1.0' );
+define( 'ESLFLIX_TWA_VERSION', '1.4.2' );
 define( 'ESLFLIX_TWA_CODE_HASH_META', 'teacher_builder_code_hash' );
 define( 'ESLFLIX_TWA_CODE_CREATED_META', 'teacher_builder_code_created_at' );
 define( 'ESLFLIX_TWA_CODE_USED_META', 'teacher_builder_code_used_at' );
 define( 'ESLFLIX_TWA_ACCESS_META', 'teacher_builder_access_granted' );
+define( 'ESLFLIX_TWA_DOMAIN_TYPE_META', 'teacher_builder_domain_type' );
 define( 'ESLFLIX_TWA_CUSTOM_DOMAIN_META', 'teacher_builder_custom_domain' );
 define( 'ESLFLIX_TWA_CONNECTED_DOMAIN_META', 'teacher_builder_connected_domain' );
 define( 'ESLFLIX_TWA_CAPABILITY', 'manage_teacher_websites' );
 define( 'ESLFLIX_TWA_SITE_BASE_URL', 'https://teacher-sites.english-grammar-homework.com/' );
+define( 'ESLFLIX_TWA_RECURRING_TOPUP_HOOK', 'eslflix_teacher_recurring_calendar_topup' );
+
+/**
+ * Load the teacher-site provisioning runtime for WordPress Cron requests.
+ *
+ * The teacher builder is a sibling application rather than a WordPress
+ * plugin, so WordPress Cron does not normally load its hook callbacks.
+ */
+function eslflix_twa_load_teacher_builder_runtime() {
+    if ( function_exists( 'teacher_builder_provision_reserved_subdomain' ) ) {
+        return true;
+    }
+
+    $domains_root = dirname( dirname( untrailingslashit( ABSPATH ) ) );
+    $runtime = $domains_root . '/teacher-sites.english-grammar-homework.com/public_html/includes/bootstrap.php';
+    if ( ! is_readable( $runtime ) ) {
+        error_log( 'ESLFlix Teacher Websites: provisioning runtime could not be loaded.' );
+        return false;
+    }
+
+    require_once $runtime;
+    return function_exists( 'teacher_builder_provision_reserved_subdomain' );
+}
+
+/**
+ * Continue a teacher subdomain setup from a normal WordPress Cron request.
+ */
+function eslflix_twa_retry_domain_provisioning( $user_id ) {
+    $user_id = absint( $user_id );
+    if ( $user_id < 1 || ! eslflix_twa_load_teacher_builder_runtime() ) {
+        return;
+    }
+
+    teacher_builder_provision_reserved_subdomain( $user_id );
+}
+add_action( 'teacher_builder_retry_domain_provisioning', 'eslflix_twa_retry_domain_provisioning', 10, 1 );
+
+/**
+ * Restore missing retry events for unfinished subdomain setups.
+ */
+function eslflix_twa_restore_domain_provisioning_retries() {
+    if ( get_transient( 'eslflix_twa_provisioning_retry_watchdog' ) ) {
+        return;
+    }
+    set_transient( 'eslflix_twa_provisioning_retry_watchdog', '1', MINUTE_IN_SECONDS );
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'teacher_websites';
+    $pending_user_ids = $wpdb->get_col(
+        "SELECT user_id
+         FROM {$table}
+         WHERE subdomain_locked = 1
+           AND provisioning_status IN ('reserved', 'provisioning', 'waiting_ssl', 'failed')
+           AND provisioning_attempts < 20
+         ORDER BY updated_at ASC
+         LIMIT 20"
+    );
+
+    foreach ( $pending_user_ids as $pending_user_id ) {
+        $args = [ absint( $pending_user_id ) ];
+        if ( ! wp_next_scheduled( 'teacher_builder_retry_domain_provisioning', $args ) ) {
+            wp_schedule_single_event(
+                time() + MINUTE_IN_SECONDS,
+                'teacher_builder_retry_domain_provisioning',
+                $args
+            );
+        }
+    }
+}
+add_action( 'init', 'eslflix_twa_restore_domain_provisioning_retries', 30 );
 
 /**
  * Grant teacher-website administration to WordPress administrators and the
@@ -215,6 +286,132 @@ function eslflix_twa_preferred_domain( $user_id, $profile ) {
 }
 
 /**
+ * Return the public HTTPS URL for a connected teacher domain.
+ */
+function eslflix_twa_public_site_url( $domain ) {
+    $domain = strtolower( trim( (string) $domain ) );
+    return $domain !== '' ? esc_url_raw( 'https://' . $domain . '/' ) : '';
+}
+
+/**
+ * Use the same sender details as the ESLFlix exercise-generator emails.
+ */
+function eslflix_twa_mail_from() {
+    return 'info@eslflix.com';
+}
+
+function eslflix_twa_mail_from_name() {
+    return 'ESLFlix';
+}
+
+function eslflix_twa_mail_content_type() {
+    return 'text/html';
+}
+
+/**
+ * Load the shared teacher-calendar helpers for recurring-series expansion.
+ */
+function eslflix_twa_load_teacher_calendar_runtime() {
+    if ( function_exists( 'teacher_calendar_top_up_all_recurring_series' ) ) {
+        return true;
+    }
+    $runtime_file = dirname( ABSPATH, 2 )
+        . '/teacher-sites.english-grammar-homework.com/public_html/includes/calendar.php';
+    if ( ! is_readable( $runtime_file ) ) {
+        return false;
+    }
+    require_once $runtime_file;
+    return function_exists( 'teacher_calendar_top_up_all_recurring_series' );
+}
+
+/**
+ * Keep ongoing weekly series populated roughly three months ahead.
+ */
+function eslflix_twa_top_up_recurring_calendars() {
+    global $wpdb;
+    if ( ! eslflix_twa_load_teacher_calendar_runtime() ) {
+        return;
+    }
+    $user_ids = $wpdb->get_col(
+        $wpdb->prepare(
+            "SELECT DISTINCT user_id FROM {$wpdb->usermeta} WHERE meta_key = %s",
+            'teacher_calendar_recurring_series'
+        )
+    );
+    foreach ( array_map( 'absint', (array) $user_ids ) as $user_id ) {
+        if ( $user_id > 0 ) {
+            teacher_calendar_top_up_all_recurring_series( $user_id );
+        }
+    }
+}
+add_action( ESLFLIX_TWA_RECURRING_TOPUP_HOOK, 'eslflix_twa_top_up_recurring_calendars' );
+
+/**
+ * Activation hooks do not rerun on file-only updates, so register the daily
+ * event lazily on the next normal WordPress request.
+ */
+function eslflix_twa_ensure_recurring_topup_event() {
+    if ( ! wp_next_scheduled( ESLFLIX_TWA_RECURRING_TOPUP_HOOK ) ) {
+        wp_schedule_event(
+            time() + ( 5 * MINUTE_IN_SECONDS ),
+            'daily',
+            ESLFLIX_TWA_RECURRING_TOPUP_HOOK
+        );
+    }
+}
+add_action( 'init', 'eslflix_twa_ensure_recurring_topup_event', 30 );
+
+/**
+ * Tell a teacher that their connected public website is ready to share.
+ */
+function eslflix_twa_send_website_ready_email( $user, $domain ) {
+    if ( ! $user instanceof WP_User || ! is_email( $user->user_email ) ) {
+        return false;
+    }
+
+    $site_url = eslflix_twa_public_site_url( $domain );
+    if ( $site_url === '' ) {
+        return false;
+    }
+
+    $teacher_name = trim( (string) ( $user->display_name ?: $user->user_login ) );
+    $subject = 'Your ESLFlix teacher website is ready!';
+    $button_style = 'background-color: #E50914; color: #ffffff; padding: 14px 28px; text-decoration: none; border-radius: 5px; font-size: 18px; font-weight: bold; display: inline-block; box-shadow: 0 4px 6px rgba(0,0,0,0.12);';
+    $logo_html = '<div style="text-align: center; margin-bottom: 20px;"><div style="font-family: Arial, sans-serif; font-size: 32px; font-weight: 900; letter-spacing: 1px; color: #333333; display: inline-block;"><span style="color: #E50914;">ESL</span>Flix</div></div>';
+
+    $body = '<div style="background-color: #f4f4f6; padding: 28px 12px;">';
+    $body .= '<div style="font-family: Arial, sans-serif; color: #333333; line-height: 1.6; max-width: 600px; margin: 0 auto; padding: 26px; background-color: #ffffff; border: 1px solid #eeeeee; border-radius: 8px;">';
+    $body .= $logo_html;
+    $body .= '<h2 style="color: #E50914; border-bottom: 2px solid #E50914; padding-bottom: 10px; margin-top: 0;">Your teacher website is ready!</h2>';
+    $body .= '<p>Hi ' . esc_html( $teacher_name ) . ',</p>';
+    $body .= '<p>Your ESLFlix teacher website has been connected and is now ready to share with your students.</p>';
+    $body .= '<div style="margin: 28px 0; padding: 18px 20px; background-color: #fff4f4; border: 1px solid #f3c1c4; border-radius: 8px; text-align: center;">';
+    $body .= '<div style="font-size: 12px; letter-spacing: 1px; text-transform: uppercase; font-weight: bold; color: #E50914; margin-bottom: 6px;">Your website address</div>';
+    $body .= '<a href="' . esc_url( $site_url ) . '" style="color: #333333; font-size: 18px; font-weight: bold; text-decoration: none; word-break: break-all;">' . esc_html( $domain ) . '</a>';
+    $body .= '</div>';
+    $body .= '<div style="margin: 30px 0; text-align: center;">';
+    $body .= '<a href="' . esc_url( $site_url ) . '" style="' . $button_style . '">View Your Website</a>';
+    $body .= '</div>';
+    $body .= '<p>You can continue using the website builder whenever you want to update your profile, prices, availability, reviews, or other website details.</p>';
+    $body .= '<p style="font-size: 13px; color: #777777;">If the button does not open, copy this address into your browser:<br><a href="' . esc_url( $site_url ) . '" style="color: #E50914; word-break: break-all;">' . esc_html( $site_url ) . '</a></p>';
+    $body .= '<p style="margin-top: 30px; text-align: center;">Lloyd<br><strong><span style="color: #E50914;">ESL</span>Flix</strong></p>';
+    $body .= '</div>';
+    $body .= '</div>';
+
+    add_filter( 'wp_mail_from', 'eslflix_twa_mail_from' );
+    add_filter( 'wp_mail_from_name', 'eslflix_twa_mail_from_name' );
+    add_filter( 'wp_mail_content_type', 'eslflix_twa_mail_content_type' );
+
+    $sent = wp_mail( $user->user_email, $subject, $body );
+
+    remove_filter( 'wp_mail_from', 'eslflix_twa_mail_from' );
+    remove_filter( 'wp_mail_from_name', 'eslflix_twa_mail_from_name' );
+    remove_filter( 'wp_mail_content_type', 'eslflix_twa_mail_content_type' );
+
+    return (bool) $sent;
+}
+
+/**
  * Normalize an admin-entered custom domain.
  */
 function eslflix_twa_normalize_domain( $value ) {
@@ -293,19 +490,34 @@ function eslflix_twa_handle_admin_action() {
     }
 
     if ( 'generate_code' === $requested_action ) {
+        $domain_type = isset( $_POST['domain_type'] )
+            ? sanitize_key( wp_unslash( $_POST['domain_type'] ) )
+            : 'subdomain';
+        if ( ! in_array( $domain_type, [ 'subdomain', 'top_level' ], true ) ) {
+            eslflix_twa_set_admin_notice(
+                [
+                    'type'    => 'error',
+                    'message' => 'Choose whether this builder code includes an ESLFlix subdomain or top-level domain support.',
+                ]
+            );
+            eslflix_twa_redirect_after_action( $user_id );
+        }
+
         $builder_code = eslflix_twa_generate_builder_code();
         $normalized_code = eslflix_teacher_websites_normalize_builder_code( $builder_code );
+        $domain_label = 'top_level' === $domain_type ? 'top-level domain' : 'ESLFlix subdomain';
 
         update_user_meta( $user_id, ESLFLIX_TWA_CODE_HASH_META, wp_hash_password( $normalized_code ) );
         update_user_meta( $user_id, ESLFLIX_TWA_CODE_CREATED_META, current_time( 'mysql' ) );
         update_user_meta( $user_id, ESLFLIX_TWA_ACCESS_META, '0' );
+        update_user_meta( $user_id, ESLFLIX_TWA_DOMAIN_TYPE_META, $domain_type );
         delete_user_meta( $user_id, ESLFLIX_TWA_CODE_USED_META );
 
         eslflix_twa_set_admin_notice(
             [
                 'type'         => 'success',
-                'message'      => sprintf( 'A new single-use builder code was generated for %s.', $user->display_name ),
-                'secret_label' => 'Builder code',
+                'message'      => sprintf( 'A new single-use builder code with %1$s support was generated for %2$s.', $domain_label, $user->display_name ),
+                'secret_label' => sprintf( 'Builder code · %s', $domain_label ),
                 'secret'       => $builder_code,
                 'warning'      => 'Copy this code now. It is stored securely and cannot be displayed again.',
             ]
@@ -418,19 +630,52 @@ function eslflix_twa_handle_admin_action() {
         if ( $should_connect ) {
             update_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META, $preferred_domain );
             eslflix_twa_set_profile_published( $user_id, true );
+
+            $updated_profiles = eslflix_twa_get_profile_records();
+            $saved_domain = strtolower( trim( (string) get_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META, true ) ) );
+            $connection_is_ready = (
+                $saved_domain === $preferred_domain
+                && ! empty( $updated_profiles[ $user_id ]['published'] )
+            );
+
+            if ( ! $connection_is_ready ) {
+                delete_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META );
+                eslflix_twa_set_profile_published( $user_id, false );
+                eslflix_twa_set_admin_notice(
+                    [
+                        'type'    => 'error',
+                        'message' => 'The domain connection could not be saved. No website-ready email was sent.',
+                    ]
+                );
+                eslflix_twa_redirect_after_action( $user_id );
+            }
+
+            $email_sent = eslflix_twa_send_website_ready_email( $user, $preferred_domain );
         } else {
             delete_user_meta( $user_id, ESLFLIX_TWA_CONNECTED_DOMAIN_META );
             eslflix_twa_set_profile_published( $user_id, false );
+            $email_sent = null;
         }
 
-        eslflix_twa_set_admin_notice(
-            [
-                'type'    => 'success',
-                'message' => $should_connect
-                    ? sprintf( '%s is confirmed as connected for %s.', $preferred_domain, $user->display_name )
-                    : sprintf( 'The public website link was disabled for %s.', $user->display_name ),
-            ]
-        );
+        $notice = [
+            'type'    => 'success',
+            'message' => $should_connect
+                ? sprintf(
+                    '%s is confirmed as connected for %s. The website-ready email was sent to %s.',
+                    $preferred_domain,
+                    $user->display_name,
+                    $user->user_email
+                )
+                : sprintf( 'The public website link was disabled for %s.', $user->display_name ),
+        ];
+        if ( $should_connect && ! $email_sent ) {
+            $notice['message'] = sprintf( '%s is confirmed as connected for %s.', $preferred_domain, $user->display_name );
+            $notice['warning'] = sprintf(
+                'WordPress could not send the website-ready email to %s. The website remains connected.',
+                $user->user_email
+            );
+        }
+        eslflix_twa_set_admin_notice( $notice );
         eslflix_twa_redirect_after_action( $user_id );
     }
 
@@ -591,17 +836,33 @@ function eslflix_twa_render_search_result( $user, $search, $profile_records ) {
             <a href="mailto:<?php echo esc_attr( $user->user_email ); ?>"><?php echo esc_html( $user->user_email ); ?></a>
         </div>
         <div class="eslflix-twa-user-actions">
-            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="eslflix-twa-code-form">
                 <?php eslflix_twa_render_action_fields( $user->ID, 'generate_code', $search ); ?>
-                <button
-                    type="submit"
-                    class="button button-primary<?php echo $replacement_code ? ' eslflix-twa-requires-confirmation' : ''; ?>"
-                    <?php if ( $replacement_code ) : ?>
-                        data-confirm="<?php echo esc_attr( $has_access ? 'Generating a new code will lock this teacher out of the builder until they enter the replacement code. Continue?' : 'This replaces the builder code already waiting to be used. Continue?' ); ?>"
-                    <?php endif; ?>
-                >
-                    <?php echo $replacement_code ? 'Generate new builder code' : 'Generate builder code'; ?>
-                </button>
+                <span>Generate builder code for:</span>
+                <div class="eslflix-twa-code-choices">
+                    <button
+                        type="submit"
+                        name="domain_type"
+                        value="subdomain"
+                        class="button button-primary<?php echo $replacement_code ? ' eslflix-twa-requires-confirmation' : ''; ?>"
+                        <?php if ( $replacement_code ) : ?>
+                            data-confirm="<?php echo esc_attr( $has_access ? 'Generate a new subdomain builder code? This will lock the teacher out until they enter it.' : 'Replace the waiting code with a subdomain builder code?' ); ?>"
+                        <?php endif; ?>
+                    >
+                        <?php echo $replacement_code ? 'New subdomain code' : 'Generate subdomain code'; ?>
+                    </button>
+                    <button
+                        type="submit"
+                        name="domain_type"
+                        value="top_level"
+                        class="button eslflix-twa-top-level-button<?php echo $replacement_code ? ' eslflix-twa-requires-confirmation' : ''; ?>"
+                        <?php if ( $replacement_code ) : ?>
+                            data-confirm="<?php echo esc_attr( $has_access ? 'Generate a new top-level domain builder code? This will lock the teacher out until they enter it.' : 'Replace the waiting code with a top-level domain builder code?' ); ?>"
+                        <?php endif; ?>
+                    >
+                        <?php echo $replacement_code ? 'New top-level code' : 'Generate top-level domain code'; ?>
+                    </button>
+                </div>
             </form>
             <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
                 <?php eslflix_twa_render_action_fields( $user->ID, 'reset_password', $search ); ?>
@@ -828,15 +1089,28 @@ function eslflix_twa_render_admin_page() {
                                     </td>
                                     <td data-label="Account actions">
                                         <div class="eslflix-twa-row-actions">
-                                            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+                                            <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>" class="eslflix-twa-code-form is-compact">
                                                 <?php eslflix_twa_render_action_fields( $teacher->ID, 'generate_code' ); ?>
-                                                <button
-                                                    type="submit"
-                                                    class="button<?php echo $replacement_code ? ' eslflix-twa-requires-confirmation' : ''; ?>"
-                                                    <?php if ( $replacement_code ) : ?>
-                                                        data-confirm="<?php echo esc_attr( $has_access ? 'Generating a new code will lock this teacher out until the replacement code is entered. Continue?' : 'This replaces the builder code already waiting to be used. Continue?' ); ?>"
-                                                    <?php endif; ?>
-                                                ><?php echo $replacement_code ? 'New code' : 'Generate code'; ?></button>
+                                                <div class="eslflix-twa-code-choices">
+                                                    <button
+                                                        type="submit"
+                                                        name="domain_type"
+                                                        value="subdomain"
+                                                        class="button<?php echo $replacement_code ? ' eslflix-twa-requires-confirmation' : ''; ?>"
+                                                        <?php if ( $replacement_code ) : ?>
+                                                            data-confirm="<?php echo esc_attr( $has_access ? 'Generate a new subdomain builder code? This will lock the teacher out until it is entered.' : 'Replace the waiting code with a subdomain builder code?' ); ?>"
+                                                        <?php endif; ?>
+                                                    ><?php echo $replacement_code ? 'New subdomain code' : 'Subdomain code'; ?></button>
+                                                    <button
+                                                        type="submit"
+                                                        name="domain_type"
+                                                        value="top_level"
+                                                        class="button eslflix-twa-top-level-button<?php echo $replacement_code ? ' eslflix-twa-requires-confirmation' : ''; ?>"
+                                                        <?php if ( $replacement_code ) : ?>
+                                                            data-confirm="<?php echo esc_attr( $has_access ? 'Generate a new top-level domain builder code? This will lock the teacher out until it is entered.' : 'Replace the waiting code with a top-level domain builder code?' ); ?>"
+                                                        <?php endif; ?>
+                                                    ><?php echo $replacement_code ? 'New top-level code' : 'Top-level code'; ?></button>
+                                                </div>
                                             </form>
                                             <form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
                                                 <?php eslflix_twa_render_action_fields( $teacher->ID, 'reset_password' ); ?>
